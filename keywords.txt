@@ -1,4 +1,5 @@
 man LITERAL1
+dman LITERAL1
 Manchester	KEYWORD1
 setTxPin	KEYWORD2
 setRxPin	KEYWORD2
