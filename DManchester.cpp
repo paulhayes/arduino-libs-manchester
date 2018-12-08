@@ -30,17 +30,20 @@ static int8_t RxPin = 255;
 
 static int16_t rx_sample = 0;
 static int16_t rx_last_sample = 0;
-static uint8_t rx_count = 0;
+static uint32_t rx_count = 0;
+static uint8_t last_rx_count = 0;
 static uint8_t rx_sync_count = 0;
 static uint8_t rx_mode = RX_MODE_IDLE;
 
-static uint16_t rx_manBits = 0; //the received manchester 32 bits
+static uint8_t rx_manBits = 0; //the received manchester 32 bits
 static uint8_t rx_numMB = 0; //the number of received manchester bits
 static uint8_t rx_curByte = 0;
 
 static uint8_t rx_maxBytes = 2;
 static uint8_t rx_default_data[2];
 static uint8_t* rx_data = rx_default_data;
+
+static uint8_t pulseCount = 0;
 
 DifferencialManchester::DifferencialManchester() //constructor
 {
@@ -53,6 +56,10 @@ void DifferencialManchester::setTxPin(uint8_t pinA, uint8_t pinB)
   TxPin2 = pinB;
   pinMode(TxPin, OUTPUT); 
   pinMode(TxPin2, OUTPUT); 
+
+  digitalWrite(TxPin,LOW);
+  digitalWrite(TxPin2,HIGH);
+  lastWrite = LOW;
 }
 
 void DifferencialManchester::setTxPin(uint8_t pin)
@@ -192,14 +199,18 @@ void DifferencialManchester::transmitArray(uint8_t numBytes, uint8_t *data)
   sendZero();
   sendZero();
   sendZero();
+  
 #endif
 }//end of send the data
 
 
 void DifferencialManchester::sendZero(void)
 {
+  //Serial.print("0");
+
   uint8_t b = !lastWrite;
   if(TxPin2!=254){
+      
     delayMicroseconds(delay1);
     digitalWrite(TxPin, b);
     digitalWrite(TxPin2, !b);
@@ -222,25 +233,27 @@ void DifferencialManchester::sendZero(void)
 
 void DifferencialManchester::sendOne(void)
 {
-  uint8_t b = !lastWrite;
-  if(TxPin2!=254){
-  delayMicroseconds(delay1);
-  digitalWrite(TxPin, b);
-  digitalWrite(TxPin2, !b);
+  //Serial.print("1");
 
-  delayMicroseconds(delay2);
-  digitalWrite(TxPin, b);
-  digitalWrite(TxPin2, !b);
+  uint8_t b = lastWrite;
+  if(TxPin2!=254){
+    delayMicroseconds(delay1);
+    digitalWrite(TxPin, b);
+    digitalWrite(TxPin2, !b);
+
+    delayMicroseconds(delay2);
+    digitalWrite(TxPin, !b);
+    digitalWrite(TxPin2, b);
   }
   else {
     delayMicroseconds(delay1);
     digitalWrite(TxPin, b);
 
     delayMicroseconds(delay2);
-    digitalWrite(TxPin, b);
+    digitalWrite(TxPin, !b);
   }
 
-  lastWrite = b;
+  lastWrite = !b;
 }//end of send one
 
 //TODO use repairing codes perhabs?
@@ -523,14 +536,14 @@ void MANRX_SetRxPin(uint8_t pin)
   pinMode(RxPin, INPUT);
 }//end of set transmit pin
 
-void AddManBit(uint16_t *manBits, uint8_t *numMB,
+void AddBit(uint8_t *manBits, uint8_t *numMB,
                uint8_t *curByte, uint8_t *data,
                uint8_t bit)
 {
   *manBits <<= 1;
   *manBits |= bit;
   (*numMB)++;
-  if (*numMB == 16)
+  if (*numMB == 8)
   {
     uint8_t newData = 0;
     for (int8_t i = 0; i < 8; i++)
@@ -541,9 +554,10 @@ void AddManBit(uint16_t *manBits, uint8_t *numMB,
       // We can decode each bit by looking at the bottom bit of each pair.
       newData <<= 1;
       newData |= (*manBits & 1); // store the one
-      *manBits = *manBits >> 2; //get next data bit
+      *manBits = *manBits >> 1; //get next data bit
     }
     data[*curByte] = newData ^ DECOUPLING_MASK;
+            
     (*curByte)++;
 
     // added by caoxp @ https://github.com/caoxp
@@ -580,19 +594,20 @@ ISR(TIMER2_COMPA_vect)
     rx_count += 8;
     
     // Check for value change
-    //rx_sample = digitalRead(RxPin);
+    rx_sample = digitalRead(RxPin);
     // caoxp@github, 
     // add filter.
     // sample twice, only the same means a change.
+    /*
     static uint8_t rx_sample_0=0;
     static uint8_t rx_sample_1=0;
     rx_sample_1 = digitalRead(RxPin);
-    if( (rx_sample_1 == rx_sample_0) != rx_last_sample )
+    if( rx_sample_1 == rx_sample_0 )
     {
-      rx_sample = rx_sample_0 == rx_sample_1;
+      rx_sample = rx_sample_1;
     }
     rx_sample_0 = rx_sample_1;
-
+    */
 
     //check sample transition
     uint8_t transition = (rx_sample != rx_last_sample);
@@ -600,9 +615,10 @@ ISR(TIMER2_COMPA_vect)
     if (rx_mode == RX_MODE_PRE)
     {
       // Wait for first transition to HIGH
-      if (transition && (rx_sample == 1))
+      if (transition)
       {
         rx_count = 0;
+        last_rx_count = 0;
         rx_sync_count = 0;
         rx_mode = RX_MODE_SYNC;
       }
@@ -612,14 +628,14 @@ ISR(TIMER2_COMPA_vect)
       // Initial sync block
       if (transition)
       {
-        if( ( (rx_sync_count < (SYNC_PULSE_MIN * 2) )  || (rx_last_sample == 1)  ) &&
+        if( ( (rx_sync_count < (SYNC_PULSE_MIN * 2) ) ) &&
             ( (rx_count < MinCount) || (rx_count > MaxCount)))
         {
           // First 20 bits and all 1 bits are expected to be regular
           // Transition was too slow/fast
           rx_mode = RX_MODE_PRE;
         }
-        else if((rx_last_sample == 0) &&
+        else if( 
                 ((rx_count < MinCount) || (rx_count > MaxLongCount)))
         {
           // 0 bits after the 20th bit are allowed to be a double bit
@@ -628,9 +644,14 @@ ISR(TIMER2_COMPA_vect)
         }
         else
         {
+            /*
+          Serial.print("sync bit ");
+          Serial.print(rx_sync_count);
+          Serial.print(" ");
+          Serial.println(rx_count);
+          */
           rx_sync_count++;
-          
-          if((rx_last_sample == 0) &&
+          if(
              (rx_sync_count >= (SYNC_PULSE_MIN * 2) ) &&
              (rx_count >= MinLongCount))
           {
@@ -642,11 +663,17 @@ ISR(TIMER2_COMPA_vect)
             rx_manBits = 0;
             rx_numMB   = 0;
             rx_curByte = 0;
+            /*
+            Serial.println("");
+            Serial.println("mode : data");
+            */
+            
           }
           else if (rx_sync_count >= (SYNC_PULSE_MAX * 2) )
           {
             rx_mode = RX_MODE_PRE;
           }
+          last_rx_count = rx_count;
           rx_count = 0;
         }
       }
@@ -661,24 +688,44 @@ ISR(TIMER2_COMPA_vect)
         {
           // wrong signal lenght, discard the message
           rx_mode = RX_MODE_PRE;
+          /*
+          Serial.println("");
+          Serial.print("bad length ");
+          Serial.print(rx_count);
+          Serial.println(" discarding data");
+          */
         }
         else
         {
+          if((rx_count <= MaxCount))
+          {
+            pulseCount++;
+            // Add the current bit
+            
+            //Serial.println(rx_count);
+            
+          }
           if(rx_count >= MinLongCount) // was the previous bit a double bit?
           {
-            AddManBit(&rx_manBits, &rx_numMB, &rx_curByte, rx_data, rx_last_sample);
-          }
-          if ((rx_sample == 1) &&
-              (rx_curByte >= rx_maxBytes))
-          {
-            rx_mode = RX_MODE_MSG;
-          }
-          else
-          {
-            // Add the current bit
-            AddManBit(&rx_manBits, &rx_numMB, &rx_curByte, rx_data, rx_sample);
+            uint8_t bit = (pulseCount==0) ? 1 : 0;
+            //Serial.print(bit);
+            AddBit(&rx_manBits, &rx_numMB, &rx_curByte, rx_data, bit);
+            last_rx_count = rx_count;
             rx_count = 0;
+            pulseCount = 0;
+
+            
+
+            if ((rx_sample == 1) && (rx_curByte >= rx_maxBytes))
+            {
+                rx_mode = RX_MODE_MSG;
+            }
           }
+          
+          
+
+          
+          
         }
       }
     }
